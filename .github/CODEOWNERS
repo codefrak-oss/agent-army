@@ -1,0 +1,6 @@
+# Paths that change what an autonomous agent is *allowed* to do here, as
+# opposed to what it does. The ruleset "main: changes arrive by pull request"
+# requires a code-owner review on PRs touching these, so an agent cannot widen
+# its own authority through the ordinary review gate.
+/.github/    @lundmatt1
+/CLAUDE.md   @lundmatt1
