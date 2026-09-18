@@ -4,6 +4,12 @@
 # this check is what carries the rule. The ruleset on main requires the check
 # named "two-approvals" and pins it to GitHub Actions as the source.
 #
+# ONE check, not two. GitHub tracks a same-named check separately per
+# triggering event, so a failure from the push would sit beside a pass from the
+# review and keep blocking. The check is therefore only ever produced by the
+# pull_request event; a review does not evaluate anything, it re-runs that
+# original run, which then reads the reviews afresh.
+#
 # The coder App cannot weaken this file: it lacks the "workflows" permission,
 # so GitHub refuses any push from it that touches .github/workflows/, and
 # /.github/ is code-owned by a human.
@@ -15,26 +21,25 @@ on:
   pull_request_review:
     types: [submitted, dismissed]
 
-permissions:
-  pull-requests: read
-
-concurrency:
-  group: two-approvals-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+permissions: {}
 
 jobs:
   two-approvals:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     steps:
       - name: Both reviewers approved the head commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
           REQUIRED: "agent-army-pr-reviewer[bot] agent-army-sec-reviewer[bot]"
         run: |
           set -euo pipefail
+          # Read the head live: a re-run carries the original event payload.
+          HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
           reviews=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" | jq -s 'add')
           fail=0
           for who in $REQUIRED; do
@@ -51,3 +56,28 @@ jobs:
             fi
           done
           exit $fail
+
+  recheck-on-review:
+    if: github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run the pull_request check for this head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            run=$(gh api "repos/$REPO/actions/workflows/two-approvals.yml/runs?event=pull_request&head_sha=$HEAD&per_page=1" \
+                  --jq '.workflow_runs[0] | "\(.id) \(.status)"')
+            id=${run%% *}; status=${run##* }
+            if [ -z "$id" ] || [ "$id" = "null" ]; then echo "no pull_request run for $HEAD yet"; sleep 5; continue; fi
+            if [ "$status" = "completed" ]; then
+              gh api -X POST "repos/$REPO/actions/runs/$id/rerun" && { echo "re-ran $id"; exit 0; }
+            fi
+            echo "run $id is $status; waiting"; sleep 5
+          done
+          echo "could not re-run the check for $HEAD"; exit 1
