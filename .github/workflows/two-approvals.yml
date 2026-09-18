@@ -7,8 +7,10 @@
 # ONE check, not two. GitHub tracks a same-named check separately per
 # triggering event, so a failure from the push would sit beside a pass from the
 # review and keep blocking. The check is therefore only ever produced by the
-# pull_request event; a review does not evaluate anything, it re-runs that
-# original run, which then reads the reviews afresh.
+# pull_request event, in this file. A review triggers two-approvals-recheck.yml,
+# which evaluates nothing and only re-runs this run, which then reads the
+# reviews afresh. The job name "two-approvals" must never appear in any other
+# workflow: a skipped job counts as a pass for a required check.
 #
 # The coder App cannot weaken this file: it lacks the "workflows" permission,
 # so GitHub refuses any push from it that touches .github/workflows/, and
@@ -18,14 +20,11 @@ name: two-approvals
 on:
   pull_request:
     types: [opened, reopened, synchronize]
-  pull_request_review:
-    types: [submitted, dismissed]
 
 permissions: {}
 
 jobs:
   two-approvals:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
@@ -56,28 +55,3 @@ jobs:
             fi
           done
           exit $fail
-
-  recheck-on-review:
-    if: github.event_name == 'pull_request_review'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Re-run the pull_request check for this head
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 30); do
-            run=$(gh api "repos/$REPO/actions/workflows/two-approvals.yml/runs?event=pull_request&head_sha=$HEAD&per_page=1" \
-                  --jq '.workflow_runs[0] | "\(.id) \(.status)"')
-            id=${run%% *}; status=${run##* }
-            if [ -z "$id" ] || [ "$id" = "null" ]; then echo "no pull_request run for $HEAD yet"; sleep 5; continue; fi
-            if [ "$status" = "completed" ]; then
-              gh api -X POST "repos/$REPO/actions/runs/$id/rerun" && { echo "re-ran $id"; exit 0; }
-            fi
-            echo "run $id is $status; waiting"; sleep 5
-          done
-          echo "could not re-run the check for $HEAD"; exit 1
