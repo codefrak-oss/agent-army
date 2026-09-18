@@ -4,6 +4,14 @@
 # this check is what carries the rule. The ruleset on main requires the check
 # named "two-approvals" and pins it to GitHub Actions as the source.
 #
+# ONE check, not two. GitHub tracks a same-named check separately per
+# triggering event, so a failure from the push would sit beside a pass from the
+# review and keep blocking. The check is therefore only ever produced by the
+# pull_request event, in this file. A review triggers two-approvals-recheck.yml,
+# which evaluates nothing and only re-runs this run, which then reads the
+# reviews afresh. The job name "two-approvals" must never appear in any other
+# workflow: a skipped job counts as a pass for a required check.
+#
 # The coder App cannot weaken this file: it lacks the "workflows" permission,
 # so GitHub refuses any push from it that touches .github/workflows/, and
 # /.github/ is code-owned by a human.
@@ -12,29 +20,25 @@ name: two-approvals
 on:
   pull_request:
     types: [opened, reopened, synchronize]
-  pull_request_review:
-    types: [submitted, dismissed]
 
-permissions:
-  pull-requests: read
-
-concurrency:
-  group: two-approvals-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+permissions: {}
 
 jobs:
   two-approvals:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     steps:
       - name: Both reviewers approved the head commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
           REQUIRED: "agent-army-pr-reviewer[bot] agent-army-sec-reviewer[bot]"
         run: |
           set -euo pipefail
+          # Read the head live: a re-run carries the original event payload.
+          HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
           reviews=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" | jq -s 'add')
           fail=0
           for who in $REQUIRED; do
