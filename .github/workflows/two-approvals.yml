@@ -1,0 +1,53 @@
+# Required status check: both role reviewers have approved the CURRENT head
+# commit. GitHub's native "required approvals" only counts reviewers with write
+# access, and the reviewer Apps deliberately have none (contents: read), so
+# this check is what carries the rule. The ruleset on main requires the check
+# named "two-approvals" and pins it to GitHub Actions as the source.
+#
+# The coder App cannot weaken this file: it lacks the "workflows" permission,
+# so GitHub refuses any push from it that touches .github/workflows/, and
+# /.github/ is code-owned by a human.
+name: two-approvals
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: two-approvals-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  two-approvals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Both reviewers approved the head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          REQUIRED: "agent-army-pr-reviewer[bot] agent-army-sec-reviewer[bot]"
+        run: |
+          set -euo pipefail
+          reviews=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" | jq -s 'add')
+          fail=0
+          for who in $REQUIRED; do
+            last=$(jq -r --arg w "$who" '
+              [ .[] | select(.user.login == $w)
+                    | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED") ]
+              | last | if . == null then "NONE -" else "\(.state) \(.commit_id)" end' <<<"$reviews")
+            state=${last%% *}; sha=${last##* }
+            if [ "$state" = "APPROVED" ] && [ "$sha" = "$HEAD" ]; then
+              echo "ok      $who approved $HEAD"
+            else
+              echo "missing $who: latest verdict $state on ${sha} (head is $HEAD)"
+              fail=1
+            fi
+          done
+          exit $fail
